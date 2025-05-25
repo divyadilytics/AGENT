@@ -6,7 +6,7 @@ requests
 snowflake
 plotly
 tabulate
-_snowflake
+
 
 
 
