@@ -6,10 +6,12 @@ import os
 from dotenv import load_dotenv
 import re
 
-# Load environment variables
+# Load environment variables (ensure your .env file is present if you intend to use it)
 load_dotenv()
 
-# Snowflake/Cortex Configuration
+# Snowflake/Cortex Configuration - Using hardcoded values directly
+# For production, consider using os.getenv() and a .env file,
+# or Streamlit secrets, or Snowflake session context for security.
 HOST = "bnkzyio-ljb86662.snowflakecomputing.com"
 DATABASE = "AI"
 SCHEMA = "DWH_MART"
@@ -60,23 +62,14 @@ if "chart_type" not in st.session_state:
 # Snowflake connection
 @st.cache_resource
 def init_snowflake_connection():
-    required_env_vars = [
-        "SNOWFLAKE_USER",
-        "SNOWFLAKE_PASSWORD",
-        "SNOWFLAKE_ROLE",
-        "SNOWFLAKE_WAREHOUSE"
-    ]
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    if missing_vars:
-        raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
-    
+    # Directly use the hardcoded variables here
     try:
         conn = snowflake.connector.connect(
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
+            user=SNOWFLAKE_USER,
+            password=SNOWFLAKE_PASSWORD,
             account=HOST.replace(".snowflakecomputing.com", ""),
-            role=os.getenv("SNOWFLAKE_ROLE"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+            role=SNOWFLAKE_ROLE,
+            warehouse=SNOWFLAKE_WAREHOUSE,
             database=DATABASE,
             schema=SCHEMA
         )
@@ -91,7 +84,7 @@ try:
 except Exception as e:
     st.error(str(e))
     if st.session_state.debug_mode:
-        st.write(f"Debug: Environment variables - USER: {os.getenv('SNOWFLAKE_USER')}, ROLE: {os.getenv('SNOWFLAKE_ROLE')}, WAREHOUSE: {os.getenv('SNOWFLAKE_WAREHOUSE')}, HOST: {HOST}")
+        st.write(f"Debug: Connection Attempt Details - User: {SNOWFLAKE_USER}, Role: {SNOWFLAKE_ROLE}, Warehouse: {SNOWFLAKE_WAREHOUSE}, Host: {HOST}")
     st.stop()
 
 # Utility functions
@@ -199,6 +192,11 @@ if query or st.session_state.current_query:
             is_structured = is_structured_query(query)
             assistant_response = {"role": "assistant", "content": ""}
             
+            # --- IMPORTANT: This section is currently hardcoded SQL ---
+            # Your previous code used Cortex Analyst via _snowflake.send_snow_api_request.
+            # This version uses a hardcoded mapping.
+            # If you want to use Cortex Analyst, you'll need to re-integrate
+            # the _snowflake.send_snow_api_request logic here.
             if is_structured:
                 query_map = {
                     "What is the total actual award budget posted?": 
@@ -210,7 +208,9 @@ if query or st.session_state.current_query:
                     "What is the total task actual posted by award name?": 
                         "SELECT AWARD_NAME, SUM(ACTUAL_POSTED) AS TOTAL_ACTUAL FROM AI.DWH_MART.GRANTS GROUP BY AWARD_NAME"
                 }
+                # Fallback for structured queries not in the map
                 sql = query_map.get(query, f"SELECT * FROM AI.DWH_MART.GRANTS WHERE QUERY_TEXT ILIKE '%{query}%' LIMIT 10")
+                
                 if st.session_state.debug_mode:
                     st.write(f"Debug: SQL: {sql}")
                 st.markdown("**SQL Query:**")
@@ -236,9 +236,13 @@ if query or st.session_state.current_query:
                     st.markdown(response_content)
                     assistant_response["content"] = response_content
             else:
+                # --- IMPORTANT: This section is currently a placeholder for Cortex Search ---
+                # Your previous code had a working _snowflake.send_snow_api_request for search.
+                # You'll need to re-integrate that logic if you want unstructured search.
                 response_content = f"Summary for '{query}': Placeholder response due to Cortex Search unavailability."
                 st.markdown(response_content)
                 assistant_response["content"] = response_content
             
             st.session_state.chat_history.append(assistant_response)
             st.session_state.current_query = None
+            st.rerun() # Rerun to update chat history and clear input field
