@@ -6,7 +6,8 @@ import snowflake.connector
 import pandas as pd
 from snowflake.snowpark import Session
 from typing import Any, Dict, List, Optional, Tuple
-import plotly.express as px
+import plotly.express as px  # Added for interactive visualizations
+from collections import Counter # For summarizing unstructured text
 
 # Snowflake/Cortex Configuration
 HOST = "bnkzyio-ljb86662.snowflakecomputing.com" # Ensure this is your Snowflake account URL
@@ -288,8 +289,8 @@ else:
                 timeout=API_TIMEOUT // 1000 # requests timeout is in seconds
             )
             if st.session_state.debug_mode:
-                st.write(f"Debug: API Response Status: {resp.status_code}")
-                st.write(f"Debug: API Raw Response: {resp.text}")
+                st.write(f"Debug: API Request Payload for query '{query}': {payload}")
+                st.write(f"Debug: Raw API Response for query '{query}': {resp.text}")
 
             if resp.status_code < 400:
                 if not resp.text.strip():
@@ -350,8 +351,8 @@ else:
                                                     if summary_part and "No relevant content found" not in summary_part:
                                                         summarized_parts.append(summary_part)
                                                 search_results = summarized_parts
-            if not is_structured and not search_results:
-                error = "No relevant search results returned from the search service or unable to summarize."
+            if not is_structured and not sql and not explanation and not search_results:
+                error = "Cortex Analyst/Search did not return a valid response (no SQL, explanation, or search results)."
         except Exception as e:
             error = f"❌ Error Processing SSE Response: {str(e)}"
         if st.session_state.debug_mode:
@@ -363,7 +364,7 @@ else:
         try:
             # Clean text for Snowflake UDF
             text = re.sub(r'\s+', ' ', text.strip())
-            text = text.replace("'", "\\'") # Escape single quotes
+            text = text.replace("'", "''") # Escape single quotes for SQL
             query_sql = f"SELECT SNOWFLAKE.CORTEX.SUMMARIZE('{text}') AS summary"
             result = session.sql(query_sql).collect()
             summary = result[0]["SUMMARY"]
@@ -604,6 +605,7 @@ else:
                     
                     if is_structured or is_yaml_or_sql_intent:
                         response_text_from_api, api_error = snowflake_api_call(query, is_structured=True, is_yaml=is_yaml_or_sql_intent)
+                        
                         if api_error:
                             st.error(api_error)
                             response_content_for_history = api_error
@@ -684,7 +686,7 @@ else:
                             st.session_state.show_suggested_buttons = True
                         else:
                             _, _, search_results, sse_error = process_sse_response(response_text_from_api, is_structured=False, query=query)
-                            if sse_error or not search_results: # If unstructured fails, try structured as a fallback
+                            if sse_error or not search_results: # If unstructured fails or empty, try structured as a fallback
                                 if st.session_state.debug_mode:
                                     st.write(f"Debug: Unstructured failed or empty, trying structured as fallback for query: {query}")
                                 response_text_from_api, api_error = snowflake_api_call(query, is_structured=True)
@@ -817,7 +819,7 @@ else:
         # Display the main chat history
         unique_parent_queries = []
         for message in st.session_state.messages:
-            if message["role"] == "user" and "parent_query" not in message:
+            if message["role"] == "user" and "parent_query" not in message and message["content"] not in unique_parent_queries:
                 unique_parent_queries.append(message["content"])
         
         for parent_query in unique_parent_queries:
@@ -825,14 +827,22 @@ else:
             with st.chat_message("user"):
                 st.markdown(parent_query)
             
-            # Find and display the immediate assistant response for the parent query
-            parent_assistant_message = next((m for m in st.session_state.messages 
-                                            if m["role"] == "assistant" and 
-                                            "parent_query" not in m and 
-                                            m.get("content") == next((m2["content"] for m2 in st.session_state.messages 
-                                                                    if m2["role"] == "user" and m2["content"] == parent_query 
-                                                                    or (m2["role"] == "assistant" and m2.get("sql") and m2["content"].startswith("**📊 Results:**"))), None) or (m["content"] == st.session_state.messages[st.session_state.messages.index({"role": "user", "content": parent_query}) + 1]["content"])), None)
+            # Find the immediate assistant response for the parent query using a safer method
+            parent_assistant_message = None
+            user_query_idx = -1
             
+            # Find the index of the parent user query
+            for idx, msg in enumerate(st.session_state.messages):
+                if msg.get("role") == "user" and msg.get("content") == parent_query and "parent_query" not in msg:
+                    user_query_idx = idx
+                    break
+
+            # If the user query was found and there's a message immediately after it
+            if user_query_idx != -1 and (user_query_idx + 1) < len(st.session_state.messages):
+                potential_assistant_response = st.session_state.messages[user_query_idx + 1]
+                if potential_assistant_response.get("role") == "assistant" and "parent_query" not in potential_assistant_response:
+                    parent_assistant_message = potential_assistant_response
+
             if parent_assistant_message:
                 with st.chat_message("assistant"):
                     st.markdown(parent_assistant_message["content"])
@@ -840,6 +850,7 @@ else:
                         with st.expander("View SQL Query", expanded=False):
                             st.code(parent_assistant_message["sql"], language="sql")
                     
+                    # Check if results are stored in query_results for this parent_query
                     if parent_query in st.session_state.query_results and isinstance(st.session_state.query_results[parent_query], pd.DataFrame):
                         results_df = st.session_state.query_results[parent_query]
                         st.dataframe(results_df)
@@ -847,7 +858,6 @@ else:
                             st.markdown("**📈 Visualization:**")
                             with st.container(key=f"chart_container_history_{hash(parent_query)}"):
                                 display_chart_tab(results_df, prefix=f"chart_history_{hash(parent_query)}", query=parent_query)
-
 
             # Display follow-up questions and their responses
             followups = [m for m in st.session_state.messages if m.get("parent_query") == parent_query]
@@ -908,30 +918,45 @@ else:
                 if not st.session_state.messages:
                     st.markdown("No chat history yet.")
                 else:
+                    # Iterate through messages to display in sidebar history
+                    # This section needs to be careful about which messages are "main" and which are follow-ups
+                    displayed_main_queries = set()
                     for i, msg in enumerate(st.session_state.messages):
                         if msg["role"] == "user" and "parent_query" not in msg:
-                            user_message = msg["content"]
-                            col_hist1, col_hist2, col_hist3 = st.columns([8, 1, 1])
-                            with col_hist1:
-                                with st.expander(f"You: {user_message}", expanded=False):
-                                    # Find corresponding assistant message
-                                    if i + 1 < len(st.session_state.messages) and st.session_state.messages[i+1]["role"] == "assistant" and "parent_query" not in st.session_state.messages[i+1]:
-                                        st.markdown(st.session_state.messages[i+1]["content"])
-                                    else:
-                                        st.markdown("No direct response logged.")
-                            with col_hist2:
-                                if st.button("🔍", key=f"hist_search_{i}", help="Re-run this query"):
-                                    st.session_state.selected_history_query = user_message
-                                    st.session_state.current_query_to_process = user_message
-                                    st.rerun()
-                            with col_hist3:
-                                if st.button("⬇", key=f"hist_quit_{i}", help="Set as current context"):
-                                    st.session_state.selected_history_query = user_message
-                                    st.session_state.show_history = False # Close history sidebar when selected
-                                    st.rerun()
+                            # Only display main user queries once
+                            if msg["content"] not in displayed_main_queries:
+                                user_message = msg["content"]
+                                displayed_main_queries.add(user_message)
+
+                                col_hist1, col_hist2, col_hist3 = st.columns([8, 1, 1])
+                                with col_hist1:
+                                    # Find the direct assistant response for this main user query
+                                    assistant_response_for_history = None
+                                    if (i + 1) < len(st.session_state.messages) and \
+                                       st.session_state.messages[i+1]["role"] == "assistant" and \
+                                       "parent_query" not in st.session_state.messages[i+1]:
+                                        assistant_response_for_history = st.session_state.messages[i+1]["content"]
+                                    
+                                    with st.expander(f"You: {user_message}", expanded=False):
+                                        if assistant_response_for_history:
+                                            st.markdown(assistant_response_for_history)
+                                        else:
+                                            st.markdown("No direct response logged.")
+                                with col_hist2:
+                                    if st.button("🔍", key=f"hist_search_{i}", help="Re-run this query"):
+                                        st.session_state.selected_history_query = user_message
+                                        st.session_state.current_query_to_process = user_message
+                                        st.rerun()
+                                with col_hist3:
+                                    if st.button("⬇", key=f"hist_quit_{i}", help="Set as current context"):
+                                        st.session_state.selected_history_query = user_message
+                                        st.session_state.show_history = False # Close history sidebar when selected
+                                        st.rerun()
                         elif msg["role"] == "user" and "parent_query" in msg:
+                            # Display follow-up user queries indented
                             st.markdown(f"  ↪️ Follow-up: {msg['content']}")
                         elif msg["role"] == "assistant" and "parent_query" in msg:
+                            # Display follow-up assistant responses indented
                             st.markdown(f"  🤖 Follow-up Response: {msg['content']}")
 
     if __name__ == "__main__":
