@@ -637,7 +637,15 @@ else:
                                         st.write(f"**{results_df.iloc[0, 0]}**")
                                     else:
                                         st.dataframe(results_df)
-                                    response_content_for_history += "**📊 Results:**\n" + format_results_for_history(results_df)
+                                    
+                                    # Fix: Add explicit check for DataFrame type before calling to_markdown
+                                    if isinstance(results_df, pd.DataFrame):
+                                        response_content_for_history += "**📊 Results:**\n" + format_results_for_history(results_df)
+                                    else:
+                                        response_content_for_history += "**📊 Results:** Could not format data for history (non-DataFrame type).\n"
+                                        if st.session_state.debug_mode:
+                                            st.write(f"Debug: results_df was not a DataFrame type: {type(results_df)}")
+                                            
                                     response_data = results_df # Store DataFrame for follow-ups
 
                                     # Display visualization from Code 1
@@ -716,7 +724,15 @@ else:
                                                 st.write(f"**{results_df.iloc[0, 0]}**")
                                             else:
                                                 st.dataframe(results_df)
-                                            response_content_for_history += "**📊 Results:**\n" + format_results_for_history(results_df)
+
+                                            # Fix: Add explicit check for DataFrame type
+                                            if isinstance(results_df, pd.DataFrame):
+                                                response_content_for_history += "**📊 Results:**\n" + format_results_for_history(results_df)
+                                            else:
+                                                response_content_for_history += "**📊 Results:** Could not format data for history (non-DataFrame type).\n"
+                                                if st.session_state.debug_mode:
+                                                    st.write(f"Debug: results_df was not a DataFrame type: {type(results_df)}")
+                                                    
                                             response_data = results_df
                                             if not results_df.empty and len(results_df.columns) >= 2:
                                                 st.markdown("**📈 Visualization:**")
