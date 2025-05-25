@@ -3,6 +3,7 @@ pandas
 snowflake-connector-python
 snowflake-snowpark-python
 requests
+snowflake
 plotly
 tabulate
 
