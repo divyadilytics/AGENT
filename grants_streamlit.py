@@ -2,19 +2,27 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import snowflake.connector
-from collections import Counter
-import re
 import os
 from dotenv import load_dotenv
+from collections import Counter
+import re
 
-# Load environment variables locally
+# Load environment variables
 load_dotenv()
 
-# Streamlit page configuration
-st.set_page_config(page_title="📄 Multi-Model Cortex Assistant", layout="wide")
-st.title("📄 AI Assistant for GRANTS")
+# Snowflake/Cortex Configuration
+HOST = "bnkzyio-ljb86662.snowflakecomputing.com"
+DATABASE = "AI"
+SCHEMA = "DWH_MART"
+API_TIMEOUT = 360000  # 6 minutes in milliseconds
+CORTEX_SEARCH_SERVICES = "AI.DWH_MART.Grants_search_services"  # Placeholder
+SEMANTIC_MODEL = '@"AI"."DWH_MART"."GRANTS"/GRANTSyaml.yaml'  # Placeholder
 
-# Custom CSS (unchanged)
+# Streamlit page configuration
+st.set_page_config(page_title="📊 Grants AI Assistant", layout="wide")
+st.title("📄 AI Assistant for GRANTS Analytics")
+
+# Custom CSS
 st.markdown("""
 <style>
 #MainMenu, header, footer {visibility: hidden;}
@@ -38,7 +46,6 @@ st.markdown("""
 }
 .stExpander[open] > div > div > button::before {
     content: "▼ ";
-    color: #4CAF50;
 }
 .search-button button, .quit-button button {
     padding: 0px;
@@ -59,7 +66,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Suggested questions (unchanged)
+# Suggested questions
 suggested_questions = [
     "What is the posted budget for awards 41001, 41002, 41003, 41005, 41007, and 41018 by date?",
     "Give me date wise award breakdowns",
@@ -82,8 +89,8 @@ if 'debug_mode' not in st.session_state:
     st.session_state.debug_mode = False
 if 'current_query_to_process' not in st.session_state:
     st.session_state.current_query_to_process = None
-if 'show_suggested_buttons' not in st.session_state:
-    st.session_state.show_suggested_buttons = False
+if 'show_suggestions' not in st.session_state:
+    st.session_state.show_suggestions = False
 if 'show_history' not in st.session_state:
     st.session_state.show_history = False
 if 'selected_history_query' not in st.session_state:
@@ -91,12 +98,11 @@ if 'selected_history_query' not in st.session_state:
 if 'query_results' not in st.session_state:
     st.session_state.query_results = {}
 
-# Snowflake connection
+# Snowflake connection with authentication
 @st.cache_resource
 def init_snowflake_connection():
     """Initialize Snowflake connection with error handling."""
     required_env_vars = [
-        "SNOWFLAKE_ACCOUNT",
         "SNOWFLAKE_USER",
         "SNOWFLAKE_PASSWORD",
         "SNOWFLAKE_ROLE",
@@ -108,13 +114,13 @@ def init_snowflake_connection():
     
     try:
         conn = snowflake.connector.connect(
-            account=os.getenv("SNOWFLAKE_ACCOUNT"),
             user=os.getenv("SNOWFLAKE_USER"),
             password=os.getenv("SNOWFLAKE_PASSWORD"),
+            account=HOST.replace(".snowflakecomputing.com", ""),
             role=os.getenv("SNOWFLAKE_ROLE"),
             warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-            database="AI",
-            schema="DWH_MART"
+            database=DATABASE,
+            schema=SCHEMA
         )
         return conn
     except Exception as e:
@@ -127,7 +133,7 @@ try:
 except Exception as e:
     st.error(str(e))
     if st.session_state.debug_mode:
-        st.write(f"Debug: Environment variables - ACCOUNT: {os.getenv('SNOWFLAKE_ACCOUNT')}, USER: {os.getenv('SNOWFLAKE_USER')}, ROLE: {os.getenv('SNOWFLAKE_ROLE')}, WAREHOUSE: {os.getenv('SNOWFLAKE_WAREHOUSE')}")
+        st.write(f"Debug: Environment variables - USER: {os.getenv('SNOWFLAKE_USER')}, ROLE: {os.getenv('SNOWFLAKE_ROLE')}, WAREHOUSE: {os.getenv('SNOWFLAKE_WAREHOUSE')}, HOST: {HOST}")
     st.stop()
 
 def run_snowflake_query(query):
@@ -189,27 +195,8 @@ def preprocess_query(query: str):
     return [normalize_term(term) for term in key_terms]
 
 def summarize_unstructured_answer(answer: str, query: str):
-    """Summarizes unstructured text."""
-    answer = re.sub(r"^.*?Program\sOverview", "Program Overview", answer, flags=re.DOTALL)
-    sentences = re.split(r'(?<=\.|\?|\!)\s+', answer)
-    sentences = [sent.strip() for sent in sentences if sent.strip()]
-    if not sentences:
-        return "No relevant content found."
-    key_terms = preprocess_query(query)
-    all_words = ' '.join(sentences).lower().split()
-    word_counts = Counter(all_words)
-    total_words = len(all_words) + 1
-    term_weights = {term: max(1.0, 3.0 * (1 - word_counts.get(term.lower(), 0) / total_words)) for term in key_terms}
-    scored_sentences = []
-    for sent in sentences:
-        sent_lower = sent.lower()
-        score = sum(term_weights[term] for term in key_terms if term in sent_lower)
-        scored_sentences.append((sent, score))
-    scored_sentences.sort(key=lambda x: x[1], reverse=True)
-    top_sentences = [sent for sent, score in scored_sentences[:5] if score > 0]
-    if not top_sentences:
-        top_sentences = sentences[:5]
-    return "\n\n".join(f"• {sent}" for sent in top_sentences)
+    """Summarizes unstructured text (placeholder)."""
+    return f"Summary for '{query}': This is a placeholder response due to Cortex Search unavailability in Community Cloud."
 
 def format_results_for_history(df):
     """Formats a DataFrame into a Markdown table."""
@@ -269,8 +256,6 @@ def process_followup_query(followup_query: str, parent_query: str):
             response_content = f"No relevant column found for '{followup_query}'. Available columns: {available_columns}"
     else:
         response_content = summarize_unstructured_answer(response_data, followup_query)
-        if response_content == "No relevant content found.":
-            response_content = f"No relevant information found for '{followup_query}'."
     
     if st.session_state.debug_mode:
         st.write(f"Debug: Follow-up query '{followup_query}' for parent '{parent_query}' - Response: {response_content}")
@@ -279,7 +264,7 @@ def process_followup_query(followup_query: str, parent_query: str):
 
 def process_query_and_display(query: str, is_followup: bool = False, parent_query: str = None):
     """Processes a user query and displays results with a chart."""
-    st.session_state.show_suggested_buttons = False
+    st.session_state.show_suggestions = False
     
     if is_followup and parent_query:
         st.session_state.messages.append({"role": "user", "content": query, "parent_query": parent_query})
@@ -299,8 +284,30 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
             with st.spinner("Thinking... 🤖"):
                 is_structured = is_structured_query(query)
                 if is_structured:
-                    # Simplified SQL generation (replace with your actual queries or Cortex API)
-                    sample_sql = f"SELECT * FROM AI.DWH_MART.GRANTS WHERE QUERY_TEXT ILIKE '%{query}%' LIMIT 10"
+                    # Predefined SQL queries
+                    query_map = {
+                        "What is the posted budget for awards 41001, 41002, 41003, 41005, 41007, and 41018 by date?": 
+                            "SELECT DATE, BUDGET FROM AI.DWH_MART.GRANTS WHERE AWARD_NUMBER IN ('41001', '41002', '41003', '41005', '41007', '41018') ORDER BY DATE",
+                        "Give me date wise award breakdowns": 
+                            "SELECT DATE, AWARD_NUMBER, BUDGET FROM AI.DWH_MART.GRANTS ORDER BY DATE",
+                        "Give me award breakdowns": 
+                            "SELECT AWARD_NUMBER, BUDGET, ENCUMBRANCE_POSTED FROM AI.DWH_MART.GRANTS",
+                        "Give me date wise award budget, actual award posted,award encunbrance posted,award encumbrance approved": 
+                            "SELECT DATE, BUDGET, ACTUAL_POSTED, ENCUMBRANCE_POSTED, ENCUMBRANCE_APPROVED FROM AI.DWH_MART.GRANTS ORDER BY DATE",
+                        "What is the task actual posted by award name?": 
+                            "SELECT AWARD_NAME, ACTUAL_POSTED FROM AI.DWH_MART.GRANTS",
+                        "What is the award budget posted by date for these awards?": 
+                            "SELECT DATE, BUDGET FROM AI.DWH_MART.GRANTS ORDER BY DATE",
+                        "What is the total award encumbrance posted for these awards?": 
+                            "SELECT SUM(ENCUMBRANCE_POSTED) AS TOTAL_ENCUMBRANCE FROM AI.DWH_MART.GRANTS",
+                        "What is the total amount of award encumbrances approved?": 
+                            "SELECT SUM(ENCUMBRANCE_APPROVED) AS TOTAL_APPROVED FROM AI.DWH_MART.GRANTS",
+                        "What is the total actual award posted for these awards?": 
+                            "SELECT SUM(ACTUAL_POSTED) AS TOTAL_ACTUAL FROM AI.DWH_MART.GRANTS",
+                        "what is the award budget posted?": 
+                            "SELECT BUDGET FROM AI.DWH_MART.GRANTS",
+                    }
+                    sample_sql = query_map.get(query, f"SELECT * FROM AI.DWH_MART.GRANTS WHERE QUERY_TEXT ILIKE '%{query}%' LIMIT 10")
                     if st.session_state.debug_mode:
                         st.write(f"Debug: Generated SQL: {sample_sql}")
                     st.markdown("**📜 SQL Query:**")
@@ -310,12 +317,12 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                     if query_error:
                         st.error(query_error)
                         response_content_for_history += query_error
-                        st.session_state.show_suggested_buttons = True
+                        st.session_state.show_suggestions = True
                     elif results_df is not None and not results_df.empty:
                         st.markdown("**📊 Results:**")
                         st.dataframe(results_df)
                         response_content_for_history += "**📊 Results:**\n" + format_results_for_history(results_df)
-                        chart = create_chart(results_df)
+                        chart = create_chart(results_df, x_col="DATE", y_col="BUDGET")  # Customize as needed
                         if chart:
                             st.markdown("**📈 Chart:**")
                             st.plotly_chart(chart, use_container_width=True)
@@ -324,13 +331,13 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                     else:
                         st.markdown("⚠️ No data found for the query.")
                         response_content_for_history += "⚠️ No data found for the query.\n"
-                        st.session_state.show_suggested_buttons = True
+                        st.session_state.show_suggestions = True
                 else:
-                    response_content = f"Summary for '{query}': This is a placeholder response for unstructured queries."
+                    response_content = summarize_unstructured_answer("", query)
                     st.write(response_content)
                     response_content_for_history += f"**🔍 Summary:**\n{response_content}\n"
                     response_data = response_content
-                    st.session_state.show_suggested_buttons = True
+                    st.session_state.show_suggestions = True
                 st.session_state.messages.append({"role": "assistant", "content": response_content_for_history})
                 if response_data is not None:
                     st.session_state.query_results[query] = response_data
@@ -394,7 +401,7 @@ def main():
     for parent_query in parent_queries:
         with st.chat_message("user"):
             st.markdown(parent_query)
-        assistant_messages = [m for m in st.session_state.messages if m["role"] == "assistant" and "parent_query" not in m and m["content"] == next(m2["content"] for m2 in st.session_state.messages if m2["role"] == "assistant" and m2.get("parent_query") == parent_query or (m2["content"] == m["content"] and m2.get("parent_query") is None))]
+        assistant_messages = [m for m in st.session_state.messages if m["role"] == "assistant" and m.get("parent_query") == parent_query or (m["content"] == next(m2["content"] for m2 in st.session_state.messages if m2["role"] == "assistant" and m2.get("parent_query") == parent_query or m2["content"] == m["content"]))]
         if assistant_messages:
             with st.chat_message("assistant"):
                 st.markdown(assistant_messages[0]["content"])
@@ -429,7 +436,7 @@ def main():
         process_query_and_display(query_to_process)
         st.rerun()
 
-    if st.session_state.show_suggested_buttons:
+    if st.session_state.show_suggestions:
         st.markdown("---")
         st.markdown("### 💡 Try one of these questions:")
         cols = st.columns(2)
