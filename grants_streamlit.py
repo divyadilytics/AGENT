@@ -4,14 +4,17 @@ import plotly.express as px
 import snowflake.connector
 from collections import Counter
 import re
-import json
 import os
+from dotenv import load_dotenv
+
+# Load environment variables locally
+load_dotenv()
 
 # Streamlit page configuration
 st.set_page_config(page_title="📄 Multi-Model Cortex Assistant", layout="wide")
 st.title("📄 AI Assistant for GRANTS")
 
-# Custom CSS (unchanged from your code)
+# Custom CSS (unchanged)
 st.markdown("""
 <style>
 #MainMenu, header, footer {visibility: hidden;}
@@ -88,25 +91,43 @@ if 'selected_history_query' not in st.session_state:
 if 'query_results' not in st.session_state:
     st.session_state.query_results = {}
 
-# Snowflake connection (replace with your credentials)
+# Snowflake connection
 @st.cache_resource
 def init_snowflake_connection():
-    return snowflake.connector.connect(
-        account=os.getenv("SNOWFLAKE_ACCOUNT"),
-        user=os.getenv("SNOWFLAKE_USER"),
-        password=os.getenv("SNOWFLAKE_PASSWORD"),
-        role=os.getenv("SNOWFLAKE_ROLE"),
-        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-        database="AI",
-        schema="DWH_MART"
-    )
+    """Initialize Snowflake connection with error handling."""
+    required_env_vars = [
+        "SNOWFLAKE_ACCOUNT",
+        "SNOWFLAKE_USER",
+        "SNOWFLAKE_PASSWORD",
+        "SNOWFLAKE_ROLE",
+        "SNOWFLAKE_WAREHOUSE"
+    ]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
+    
+    try:
+        conn = snowflake.connector.connect(
+            account=os.getenv("SNOWFLAKE_ACCOUNT"),
+            user=os.getenv("SNOWFLAKE_USER"),
+            password=os.getenv("SNOWFLAKE_PASSWORD"),
+            role=os.getenv("SNOWFLAKE_ROLE"),
+            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+            database="AI",
+            schema="DWH_MART"
+        )
+        return conn
+    except Exception as e:
+        raise Exception(f"Failed to connect to Snowflake: {str(e)}")
 
 # Initialize Snowflake connection
 try:
     conn = init_snowflake_connection()
     session = conn.cursor()
 except Exception as e:
-    st.error(f"Failed to connect to Snowflake: {str(e)}")
+    st.error(str(e))
+    if st.session_state.debug_mode:
+        st.write(f"Debug: Environment variables - ACCOUNT: {os.getenv('SNOWFLAKE_ACCOUNT')}, USER: {os.getenv('SNOWFLAKE_USER')}, ROLE: {os.getenv('SNOWFLAKE_ROLE')}, WAREHOUSE: {os.getenv('SNOWFLAKE_WAREHOUSE')}")
     st.stop()
 
 def run_snowflake_query(query):
@@ -124,7 +145,6 @@ def create_chart(df, x_col=None, y_col=None):
     """Creates an interactive Plotly chart from a DataFrame."""
     if df is None or df.empty:
         return None
-    # Automatically select x and y columns if not provided
     if x_col is None:
         x_col = df.columns[0] if len(df.columns) > 0 else None
     if y_col is None:
@@ -279,7 +299,7 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
             with st.spinner("Thinking... 🤖"):
                 is_structured = is_structured_query(query)
                 if is_structured:
-                    # Simplified SQL generation for demo (replace with your Cortex API call or predefined SQL)
+                    # Simplified SQL generation (replace with your actual queries or Cortex API)
                     sample_sql = f"SELECT * FROM AI.DWH_MART.GRANTS WHERE QUERY_TEXT ILIKE '%{query}%' LIMIT 10"
                     if st.session_state.debug_mode:
                         st.write(f"Debug: Generated SQL: {sample_sql}")
@@ -295,7 +315,6 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                         st.markdown("**📊 Results:**")
                         st.dataframe(results_df)
                         response_content_for_history += "**📊 Results:**\n" + format_results_for_history(results_df)
-                        # Create and display chart
                         chart = create_chart(results_df)
                         if chart:
                             st.markdown("**📈 Chart:**")
@@ -307,7 +326,6 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                         response_content_for_history += "⚠️ No data found for the query.\n"
                         st.session_state.show_suggested_buttons = True
                 else:
-                    # Handle unstructured queries (simplified for demo)
                     response_content = f"Summary for '{query}': This is a placeholder response for unstructured queries."
                     st.write(response_content)
                     response_content_for_history += f"**🔍 Summary:**\n{response_content}\n"
@@ -318,14 +336,12 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                     st.session_state.query_results[query] = response_data
 
 def main():
-    # History button
     col1, col2 = st.columns([9, 1])
     with col2:
         if st.button("📜 Toggle History", key="history_toggle", type="primary"):
             st.session_state.show_history = not st.session_state.show_history
             st.session_state.selected_history_query = None
 
-    # Sidebar setup
     st.sidebar.header("🔍 Ask About GRANTS Analytics")
     st.sidebar.info("📂 Current Model: **GRANTS**")
     st.session_state.debug_mode = st.sidebar.checkbox("Enable Debug Mode", value=st.session_state.debug_mode)
@@ -334,7 +350,6 @@ def main():
         st.session_state.clear()
         st.rerun()
 
-    # Display chat history in sidebar
     if st.session_state.show_history:
         with st.sidebar:
             st.markdown("### 📜 Chat History")
@@ -371,7 +386,6 @@ def main():
                 st.session_state.selected_history_query = None
                 st.rerun()
 
-    # Display chat history in main area
     parent_queries = set()
     for message in st.session_state.messages:
         if message["role"] == "user" and "parent_query" not in message:
@@ -395,7 +409,6 @@ def main():
                         with st.chat_message("assistant"):
                             st.markdown(followup["content"])
 
-    # Handle user input
     placeholder_text = "Ask a question..."
     if st.session_state.selected_history_query:
         placeholder_text = f"Ask any follow-up question for: {st.session_state.selected_history_query}"
