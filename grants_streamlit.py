@@ -306,6 +306,8 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                             "SELECT SUM(ACTUAL_POSTED) AS TOTAL_ACTUAL FROM AI.DWH_MART.GRANTS",
                         "what is the award budget posted?": 
                             "SELECT BUDGET FROM AI.DWH_MART.GRANTS",
+                        "list all Subjec areas": 
+                            "SELECT DISTINCT SUBJECT_AREA FROM AI.DWH_MART.GRANTS"
                     }
                     sample_sql = query_map.get(query, f"SELECT * FROM AI.DWH_MART.GRANTS WHERE QUERY_TEXT ILIKE '%{query}%' LIMIT 10")
                     if st.session_state.debug_mode:
