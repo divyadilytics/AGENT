@@ -6,14 +6,21 @@ from snowflake.snowpark.context import get_active_session
 from collections import Counter
 
 # Initialize Snowflake session
+# This line is CORRECT and will get the active session when run in Streamlit in Snowflake.
+# It requires the app to be deployed within the Snowflake environment.
 session = get_active_session()
 
-# Cortex API Configuration
-API_ENDPOINT = "/api/v2/cortex/agent:run"
-API_TIMEOUT = 50000  # in milliseconds
+# Cortex Agent UDFs Configuration
+# These are the names of the UDFs you MUST create in your Snowflake environment.
+# They act as wrappers for the actual Cortex API calls.
+# Make sure these names match the UDFs you create in Snowflake.
+CORTEX_ANALYST_AGENT_UDF = 'AI.DWH_MART.GRANTS_ANALYST_AGENT'
+CORTEX_SEARCH_AGENT_UDF = 'AI.DWH_MART.GRANTS_SEARCH_AGENT'
 
 # Single Semantic Model Configuration
+# This points to your semantic model YAML file for the analyst agent
 SEMANTIC_MODEL = '@"AI"."DWH_MART"."GRANTS"/GRANTSyaml.yaml'
+# This points to your Cortex Search Service for the search agent
 CORTEX_SEARCH_SERVICES = "AI.DWH_MART.TRAIL_SEARCH_SERVICES"
 
 st.set_page_config(page_title="📄 Multi-Model Cortex Assistant", layout="wide")
@@ -122,14 +129,14 @@ def is_structured_query(query: str):
         "describe", "introduction", "summary", "tell me about", "overview", "explain"
     ]
     query_lower = query.lower()
-    
+
     # Check for unstructured keywords first to potentially override
     if any(keyword in query_lower for keyword in unstructured_keywords):
         structured_score = sum(1 for keyword in structured_keywords if keyword in query_lower)
         # If there are few structured keywords but unstructured ones are present, lean towards unstructured
-        if structured_score < 2: 
+        if structured_score < 2:
             return False
-            
+
     return any(keyword in query_lower for keyword in structured_keywords)
 
 def is_unstructured_query(query: str):
@@ -186,7 +193,7 @@ def summarize(text: str, query: str):
     """Calls Snowflake Cortex SUMMARIZE function with cleaned input text, with local fallback."""
     try:
         text = re.sub(r'\s+', ' ', text.strip())
-        text = text.replace("'", "\\'")
+        text = text.replace("'", "\\'") # Escape single quotes for SQL
         query_sql = f"SELECT SNOWFLAKE.CORTEX.SUMMARIZE('{text}') AS summary"
         result = session.sql(query_sql).collect()
         summary = result[0]["SUMMARY"]
@@ -216,78 +223,100 @@ def summarize(text: str, query: str):
             top_sentences = sentences[:3]
         return "\n".join(top_sentences) if top_sentences else "No relevant content found."
 
-def snowflake_api_call(query: str, is_structured: bool = False, selected_model=None, is_yaml=False):
+def call_cortex_agent_udf(agent_udf_name: str, payload: dict):
     """
-    Makes an API call to Snowflake Cortex, routing to text-to-SQL or search service
-    based on the query type.
+    Calls a Snowflake Cortex Agent UDF (User-Defined Function) with a given payload.
+    The UDF is responsible for making the actual Cortex API call.
     """
-    payload = {
-        "model": "llama3.1-70b",
-        "messages": [{"role": "user", "content": [{"type": "text", "text": query}]}],
-        "tools": []
-    }
-    if is_structured or is_yaml:
-        payload["tools"].append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "analyst1"}})
-        payload["tool_resources"] = {"analyst1": {"semantic_model_file": selected_model}}
-    else:
-        payload["tools"].append({"tool_spec": {"type": "cortex_search", "name": "search1"}})
-        payload["tool_resources"] = {"search1": {"name": CORTEX_SEARCH_SERVICES, "max_results": 10}}
+    error = None
     try:
-        resp = _snowflake.send_snow_api_request("POST", API_ENDPOINT, {}, {}, payload, None, API_TIMEOUT)
-        response = json.loads(resp["content"])
-        if st.session_state.debug_mode:
-            st.write(f"Debug: API Response for query '{query}': {response}")
-        return response, None
-    except Exception as e:
-        return None, f"❌ API Request Failed: {str(e)}"
+        # Convert the Python dictionary payload to a JSON string for the UDF input
+        # Escape single quotes within the JSON string for SQL compatibility
+        payload_json_str = json.dumps(payload).replace("'", "''")
 
-def process_sse_response(response, is_structured, query):
+        # Construct the SQL CALL statement for the agent UDF
+        call_sql = f"""
+        SELECT {agent_udf_name}(PARSE_JSON('{payload_json_str}')) AS RESULT;
+        """
+        if st.session_state.debug_mode:
+            st.write(f"Debug: Calling UDF with SQL: {call_sql}")
+
+        # Execute the SQL CALL statement
+        # The result of a UDF call is typically a single row, single column (VARIANT or VARCHAR)
+        result = session.sql(call_sql).collect()
+
+        if result and result[0][0]:
+            # The UDF is expected to return the raw JSON response from Cortex
+            # as a VARIANT. It should already be a Python dict if returned as VARIANT.
+            return result[0][0], None
+        else:
+            error = f"No valid response from Cortex Agent UDF: {agent_udf_name}"
+            return None, error
+
+    except Exception as e:
+        error = f"❌ Error calling Cortex Agent UDF '{agent_udf_name}': {str(e)}"
+        return None, error
+
+def process_cortex_response(response_data, is_structured, query):
     """
-    Processes the SSE response from Snowflake Cortex, extracting SQL/explanation
-    for structured queries or search results for unstructured queries.
+    Processes the raw JSON response from the Cortex Agent UDF, extracting
+    SQL/explanation for structured queries or search results for unstructured queries.
+    This function expects a parsed JSON dictionary.
     """
     sql = ""
     explanation = ""
     search_results = []
     error = None
-    if not response:
-        return sql, explanation, search_results, "No response from API."
+
+    if not response_data:
+        return sql, explanation, search_results, "No valid response data to process."
+
     try:
-        for event in response:
-            if isinstance(event, dict) and event.get('event') == "message.delta":
-                data = event.get('data', {})
-                delta = data.get('delta', {})
-                for content_item in delta.get('content', []):
-                    if content_item.get('type') == "tool_results":
-                        tool_results = content_item.get('tool_results', {})
-                        if 'content' in tool_results:
-                            for result in tool_results['content']:
-                                if result.get('type') == 'json':
-                                    result_data = result.get('json', {})
-                                    if is_structured:
-                                        if 'sql' in result_data:
-                                            sql = result_data.get('sql', '')
-                                        if 'explanation' in result_data:
-                                            explanation = result_data.get('explanation', '')
-                                    else:
-                                        if 'searchResults' in result_data:
-                                            key_terms = preprocess_query(query)
-                                            ranked_results = []
-                                            for sr in result_data['searchResults']:
-                                                text = sr["text"]
-                                                text_lower = text.lower()
-                                                score = sum(1 for term in key_terms if term in text_lower)
-                                                ranked_results.append((text, score))
-                                            ranked_results.sort(key=lambda x: x[1], reverse=True)
-                                            search_results = [
-                                                summarize_unstructured_answer(text, query)
-                                                for text, _ in ranked_results
-                                            ]
-                                            search_results = [sr for sr in search_results if sr and "No relevant content found" not in sr]
-        if not is_structured and not search_results:
-            error = "No relevant search results returned from the search service."
+        # The structure of the 'response_data' depends on the exact output of your Cortex Agent UDFs.
+        # This parsing logic assumes a common structure where tool results are nested.
+        # You might need to adjust this part based on what your actual UDF returns.
+
+        if 'messages' in response_data and isinstance(response_data['messages'], list):
+            for message in response_data['messages']:
+                # Cortex responses can have 'tool' role for tool outputs or 'assistant' for direct answers
+                if message.get('role') in ['tool', 'assistant']:
+                    for content_item in message.get('content', []):
+                        if content_item.get('type') == 'tool_results':
+                            tool_results = content_item.get('tool_results', {})
+                            if 'content' in tool_results and isinstance(tool_results['content'], list):
+                                for result in tool_results['content']:
+                                    if result.get('type') == 'json' and 'json' in result:
+                                        data_from_tool = result['json']
+                                        if is_structured:
+                                            sql = data_from_tool.get('sql', '')
+                                            explanation = data_from_tool.get('explanation', '')
+                                        else:
+                                            if 'searchResults' in data_from_tool and isinstance(data_from_tool['searchResults'], list):
+                                                key_terms = preprocess_query(query)
+                                                ranked_results = []
+                                                for sr in data_from_tool['searchResults']:
+                                                    text = sr.get('text', '')
+                                                    text_lower = text.lower()
+                                                    score = sum(1 for term in key_terms if term in text_lower)
+                                                    ranked_results.append((text, score))
+                                                ranked_results.sort(key=lambda x: x[1], reverse=True)
+                                                search_results = [
+                                                    summarize_unstructured_answer(text, query)
+                                                    for text, _ in ranked_results
+                                                ]
+                                                search_results = [sr for sr in search_results if sr and "No relevant content found" not in sr]
+        
+        # If the main assistant message contains a direct text response (e.g., for simple questions)
+        # This handles cases where Cortex might just give a direct text answer without tool results
+        elif 'answer' in response_data and isinstance(response_data['answer'], str) and not is_structured and not search_results:
+            search_results.append(response_data['answer'])
+
+        if not is_structured and not sql and not explanation and not search_results:
+            error = "No relevant response (SQL, explanation, or search results) returned from the Cortex agent."
+
     except Exception as e:
-        error = f"❌ Error Processing Response: {str(e)}"
+        error = f"❌ Error parsing Cortex response: {str(e)}. Raw data: {response_data}"
+
     if st.session_state.debug_mode:
         st.write(f"Debug: Processed Response - SQL: {sql}, Explanation: {explanation}, Search Results: {search_results}, Error: {error}")
     return sql.strip(), explanation.strip(), search_results, error
@@ -296,7 +325,6 @@ def format_results_for_history(df):
     """Formats a Pandas DataFrame into a Markdown table for chat history."""
     if df is None or df.empty:
         return "No data found."
-    # Check if 'tabulate' is available, otherwise fall back to string conversion
     try:
         return df.to_markdown(index=False)
     except ImportError:
@@ -309,15 +337,15 @@ def process_followup_query(followup_query: str, parent_query: str):
     """
     if parent_query not in st.session_state.query_results:
         return f"⚠️ No response data available for parent query: {parent_query}"
-    
+
     response_data = st.session_state.query_results[parent_query]
     response_content = ""
-    
+
     if isinstance(response_data, pd.DataFrame):
         # Structured query follow-up
         df = response_data
         followup_lower = followup_query.lower()
-        
+
         # Extract key terms and potential identifiers
         key_terms = preprocess_query(followup_query)
         award_number = None
@@ -325,7 +353,7 @@ def process_followup_query(followup_query: str, parent_query: str):
             if term.isdigit() or (len(term) >= 4 and any(c.isdigit() for c in term)):  # Likely an award number
                 award_number = term
                 break
-        
+
         # Find columns based on query terms
         requested_column = None
         for term in key_terms:
@@ -337,14 +365,14 @@ def process_followup_query(followup_query: str, parent_query: str):
                     break
             if requested_column:
                 break
-        
+
         # Find award number column
         award_number_col = None
         for col in df.columns:
             if 'award' in col.lower() and ('number' in col.lower() or 'id' in col.lower() or 'no' in col.lower()):
                 award_number_col = col
                 break
-        
+
         if requested_column:
             if award_number and award_number_col:
                 # Filter by award number (case-insensitive, partial match)
@@ -362,17 +390,17 @@ def process_followup_query(followup_query: str, parent_query: str):
         else:
             available_columns = ', '.join(df.columns)
             response_content = f"No relevant column found for '{followup_query}' in the parent response. Available columns: {available_columns}"
-    
+
     else:
         # Unstructured query follow-up
         parent_text = response_data
         response_content = summarize(parent_text, followup_query)
         if response_content == "No relevant content found.":
             response_content = f"No relevant information found for '{followup_query}' in the parent response."
-    
+
     if st.session_state.debug_mode:
         st.write(f"Debug: Follow-up query '{followup_query}' for parent '{parent_query}' - Response: {response_content}")
-    
+
     return response_content
 
 def process_query_and_display(query: str, is_followup: bool = False, parent_query: str = None):
@@ -381,7 +409,7 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
     and updates session state.
     """
     st.session_state.show_suggested_buttons = False
-    
+
     if is_followup:
         st.session_state.messages.append({"role": "user", "content": query, "parent_query": parent_query})
         response_content = process_followup_query(query, parent_query)
@@ -389,18 +417,28 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
     else:
         st.session_state.messages.append({"role": "user", "content": query})
         response_content_for_history = ""
-        response_data = None
-        
+        response_data_for_storage = None # This will store the DF or text for follow-ups
+
         with st.spinner("Thinking... 🤖"):
             is_structured = is_structured_query(query)
             is_yaml = detect_yaml_or_sql_intent(query)
+            
+            cortex_payload = {
+                "model": "llama3.1-70b", # Or your preferred model
+                "messages": [{"role": "user", "content": [{"type": "text", "text": query}]}],
+                "tools": []
+            }
+
             if is_structured or is_yaml:
-                response_json, api_error = snowflake_api_call(query, is_structured=True, selected_model=SEMANTIC_MODEL, is_yaml=is_yaml)
+                cortex_payload["tools"].append({"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "analyst1"}})
+                cortex_payload["tool_resources"] = {"analyst1": {"semantic_model_file": SEMANTIC_MODEL}}
+                
+                cortex_response_json, api_error = call_cortex_agent_udf(CORTEX_ANALYST_AGENT_UDF, cortex_payload)
                 if api_error:
                     response_content_for_history = api_error
                     st.session_state.show_suggested_buttons = True
                 else:
-                    final_sql, explanation, _, sse_error = process_sse_response(response_json, is_structured=True, query=query)
+                    final_sql, explanation, _, sse_error = process_cortex_response(cortex_response_json, is_structured=True, query=query)
                     if sse_error:
                         response_content_for_history = sse_error
                         st.session_state.show_suggested_buttons = True
@@ -414,20 +452,23 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                             st.session_state.show_suggested_buttons = True
                         elif results_df is not None and not results_df.empty:
                             response_content_for_history += "**📊 Results:**\n" + format_results_for_history(results_df)
-                            response_data = results_df
+                            response_data_for_storage = results_df # Store DataFrame for follow-up
                         else:
                             response_content_for_history += "⚠️ No data found for the generated SQL query.\n"
                             st.session_state.show_suggested_buttons = True
                     else:
                         response_content_for_history = "⚠️ No SQL generated. Could not understand the structured/YAML query.\n"
                         st.session_state.show_suggested_buttons = True
-            else:
-                response_json, api_error = snowflake_api_call(query, is_structured=False)
+            else: # Unstructured query
+                cortex_payload["tools"].append({"tool_spec": {"type": "cortex_search", "name": "search1"}})
+                cortex_payload["tool_resources"] = {"search1": {"name": CORTEX_SEARCH_SERVICES, "max_results": 10}}
+                
+                cortex_response_json, api_error = call_cortex_agent_udf(CORTEX_SEARCH_AGENT_UDF, cortex_payload)
                 if api_error:
                     response_content_for_history = api_error
                     st.session_state.show_suggested_buttons = True
                 else:
-                    _, _, search_results, sse_error = process_sse_response(response_json, is_structured=False, query=query)
+                    _, _, search_results, sse_error = process_cortex_response(cortex_response_json, is_structured=False, query=query)
                     if sse_error:
                         response_content_for_history = sse_error
                         st.session_state.show_suggested_buttons = True
@@ -435,51 +476,42 @@ def process_query_and_display(query: str, is_followup: bool = False, parent_quer
                         combined_results = "\n\n".join(search_results)
                         summarized_result = summarize(combined_results, query)
                         response_content_for_history += f"**🔍 Document Highlights:**\n{summarized_result}\n"
-                        response_data = summarized_result
+                        response_data_for_storage = summarized_result # Store text for follow-up
                     else:
                         response_content_for_history = f"### I couldn't find information for: '{query}'\nTry rephrasing your question or selecting from the suggested questions."
                         st.session_state.show_suggested_buttons = True
-        
+
         st.session_state.messages.append({"role": "assistant", "content": response_content_for_history})
-        if response_data is not None:
-            st.session_state.query_results[query] = response_data
+        if response_data_for_storage is not None:
+            st.session_state.query_results[query] = response_data_for_storage
 
 def display_chat_messages():
     """Displays chat messages from session state in the main chat area."""
-    # This set will keep track of which parent queries have already been displayed
     displayed_parent_queries = set()
 
     for i, message in enumerate(st.session_state.messages):
-        # Only display user messages that are not follow-ups
         if message["role"] == "user" and "parent_query" not in message:
             query = message["content"]
-            if query not in displayed_parent_queries: # Prevent re-displaying the same parent query
+            if query not in displayed_parent_queries:
                 with st.chat_message("user"):
                     st.markdown(query)
-                
-                # Find the corresponding assistant message for this original query
+
                 assistant_response = None
-                # Iterate from the next message to find the direct assistant response
                 for j in range(i + 1, len(st.session_state.messages)):
-                    # Check if it's an assistant message and not a follow-up response
                     if st.session_state.messages[j]["role"] == "assistant" and \
                        st.session_state.messages[j].get("parent_query") is None:
-                        # Assuming the first non-follow-up assistant message after a user message is its direct response
                         assistant_response = st.session_state.messages[j]["content"]
                         break
-                
-                # Check for follow-up questions related to this original query
-                followup_messages = [
-                    m for m in st.session_state.messages 
-                    if m.get("parent_query") == query
-                ]
 
-                # Display the assistant's initial response if found
                 if assistant_response:
                     with st.chat_message("assistant"):
                         st.markdown(assistant_response)
 
-                # Display follow-up questions and their answers within an expander
+                followup_messages = [
+                    m for m in st.session_state.messages
+                    if m.get("parent_query") == query
+                ]
+
                 if followup_messages:
                     with st.expander("Follow-up Questions"):
                         for f_msg in followup_messages:
@@ -489,16 +521,12 @@ def display_chat_messages():
                             elif f_msg["role"] == "assistant":
                                 with st.chat_message("assistant"):
                                     st.markdown(f_msg['content'])
-                
-                displayed_parent_queries.add(query) # Mark this parent query as displayed
 
-        # Handle follow-up user messages and their assistant responses if they aren't grouped above
-        # This part ensures that if a follow-up isn't perfectly linked, it still appears.
-        # However, the primary grouping should happen through the 'parent_query' mechanism.
+                displayed_parent_queries.add(query)
+
         elif message["role"] == "user" and "parent_query" in message and message["parent_query"] not in displayed_parent_queries:
             with st.chat_message("user"):
                 st.markdown(f"Follow-up: {message['content']}")
-            # Find the corresponding assistant message
             for j in range(i + 1, len(st.session_state.messages)):
                 if st.session_state.messages[j]["role"] == "assistant" and \
                    st.session_state.messages[j].get("parent_query") == message["content"]:
@@ -536,19 +564,17 @@ def main():
             if not st.session_state.messages:
                 st.markdown("No chat history yet.")
             else:
-                # Collect unique original user queries for history display
                 history_entries = []
                 for i in range(len(st.session_state.messages)):
                     msg = st.session_state.messages[i]
                     if msg["role"] == "user" and "parent_query" not in msg:
-                        # Find the next assistant message that is not a follow-up
                         assistant_response_content = "No response yet."
                         for j in range(i + 1, len(st.session_state.messages)):
                             if st.session_state.messages[j]["role"] == "assistant" and "parent_query" not in st.session_state.messages[j]:
                                 assistant_response_content = st.session_state.messages[j]["content"]
                                 break
-                        history_entries.append((msg["content"], assistant_response_content, i)) # Store (user_query, assistant_response, index)
-                
+                        history_entries.append((msg["content"], assistant_response_content, i))
+
                 for user_query, assistant_response_content, idx in history_entries:
                     col1, col2, col3 = st.columns([8, 1, 1])
                     with col1:
@@ -557,12 +583,10 @@ def main():
                     with col2:
                         if st.button("🔍", key=f"search_{idx}", help="Set as current context"):
                             st.session_state.selected_history_query = user_query
-                            # No need to set current_query_to_process here, as chat_input will handle it.
                             st.rerun()
                     with col3:
-                        # Only show "✖" if this query is currently selected as context
                         if st.session_state.selected_history_query == user_query:
-                            if st.button("✖", key=f"quit_{idx}", help="Clear current context"): # Changed icon for clarity
+                            if st.button("✖", key=f"quit_{idx}", help="Clear current context"):
                                 st.session_state.selected_history_query = None
                                 st.rerun()
 
@@ -581,27 +605,25 @@ def main():
     placeholder_text = "Ask a question..."
     if st.session_state.selected_history_query:
         placeholder_text = f"Ask any follow-up question for: '{st.session_state.selected_history_query}'"
-    
+
     chat_input_query = st.chat_input(placeholder=placeholder_text, key="chat_input")
-    
+
     if chat_input_query:
         if st.session_state.selected_history_query:
             process_query_and_display(chat_input_query, is_followup=True, parent_query=st.session_state.selected_history_query)
         else:
             st.session_state.current_query_to_process = chat_input_query
-        st.rerun() # Rerun to process the query immediately
+        st.rerun()
 
     # Process selected history query or new query from chat_input
     if st.session_state.current_query_to_process:
         query_to_process = st.session_state.current_query_to_process
-        st.session_state.current_query_to_process = None # Clear it after picking it up
+        st.session_state.current_query_to_process = None
 
-        # If a query is being re-run from history (and not a follow-up)
-        # we set selected_history_query to None to ensure it's treated as a new top-level query.
-        if not st.session_state.selected_history_query: # Only clear if it's not a follow-up context
+        if not st.session_state.selected_history_query:
             st.session_state.selected_history_query = None
-            
-        process_query_and_display(query_to_process, is_followup=False) # Always false for initial processing
+
+        process_query_and_display(query_to_process, is_followup=False)
         st.rerun()
 
     # Display suggested questions in the chat area if the query fails
