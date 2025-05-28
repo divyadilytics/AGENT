@@ -1,8 +1,9 @@
 streamlit
-snowflake-snowpark-python
-snowflake-cortex
+snowflake-snowpark-python==1.32.0
 streamlit-chat
 plotly
+# snowflake-cortex ← comment this
+
 
 
 
