@@ -1,18 +1,9 @@
-# UI and app framework
-streamlit==1.34.0
+streamlit
+snowflake-snowpark-python
+snowflake-cortex
+streamlit-chat
+plotly
 
-# Data manipulation
-pandas==2.2.2
-
-# Snowflake connection
-snowflake-connector-python==3.5.0
-snowflake-snowpark-python==1.32.0
-
-# Plotting and visualization
-plotly==5.22.0
-
-# HTTP requests
-requests==2.31.0
 
 
 
