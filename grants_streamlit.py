@@ -5,20 +5,20 @@ import requests
 import snowflake.connector
 import pandas as pd
 from snowflake.snowpark import Session
+from snowflake.core import Root
 from typing import Any, Dict, List, Optional, Tuple
 import plotly.express as px
 import time
 
-
 # Snowflake/Cortex Configuration
-HOST = "GBJYVCT-LSB50763.snowflakecomputing.com"
+HOST = "bnkzyio-ljb86662.snowflakecomputing.com"
 DATABASE = "AI"
 SCHEMA = "DWH_MART"
 API_ENDPOINT = "/api/v2/cortex/agent:run"
 API_TIMEOUT = 50000  # in milliseconds
-CORTEX_SEARCH_SERVICES = "AI.DWH_MART.Grants_search_services"
-#CECON_SEARCH_SERVICES = "AI.DWH_MART.propertymanagement"
-SEMANTIC_MODEL = '@"AI"."DWH_MART"."GRANTS"/GRANTSyaml_27.yaml'
+CORTEX_SEARCH_SERVICES = "AI.DWH_MART.propertymanagement"
+CECON_SEARCH_SERVICES = "AI.DWH_MART.propertymanagement"
+SEMANTIC_MODEL = '@"AI"."DWH_MART"."PROPERTY_MANAGEMENT"/property_management.yaml'
 
 # Model options
 MODELS = [
@@ -259,7 +259,7 @@ if not st.session_state.authenticated:
             conn = snowflake.connector.connect(
                 user=st.session_state.username,
                 password=st.session_state.password,
-                account="GBJYVCT-LSB50763",
+                account="bnkzyio-ljb86662",
                 host=HOST,
                 port=443,
                 warehouse="COMPUTE_WH",
@@ -284,9 +284,7 @@ if not st.session_state.authenticated:
             st.error(f"Authentication failed: {e}")
 else:
     session = st.session_state.snowpark_session
-    session = st.session_state.snowpark_session
-# remove any reference to 'Root'
-
+    root = Root(session)
 
     def run_snowflake_query(query):
         try:
@@ -562,23 +560,25 @@ else:
     st.title("Cortex AI Assistant by DiLytics")
     semantic_model_filename = SEMANTIC_MODEL.split("/")[-1]
     st.markdown(f"Semantic Model: `{semantic_model_filename}`")
+    # Display welcome message if no queries have been made
+    if not st.session_state.messages:
+        st.markdown("💡 **Welcome! I’m the Snowflake AI Assistant, ready to assist you with property management data analysis, summaries, and answers — simply type your question to get started**")
     init_service_metadata()
 
     st.sidebar.subheader("Sample Questions")
     sample_questions = [
-    "What is Property Management",
-     "What is the number of properties currently occupied?",
-"What is the number of properties by occupancy status?",
-"What is the number of properties currently leased?",
-"What are the supplier payments compared to customer billing by month?",
-"What is the total number of suppliers?",
-"What is the average supplier payment per property?",
-"What are the details of lease execution, commencement, and termination?",
-"What are the customer billing and supplier payment details by location and purpose?",
-"What is the budget recovery by billing purpose?",
-"What are the details of customer billing?",
-"What are the details of supplier payments?",
-
+        "What is Property Management",
+        "What is the number of properties currently occupied?",
+        "What is the number of properties by occupancy status?",
+        "What is the number of properties currently leased?",
+        "What are the supplier payments compared to customer billing by month?",
+        "What is the total number of suppliers?",
+        "What is the average supplier payment per property?",
+        "What are the details of lease execution, commencement, and termination?",
+        "What are the customer billing and supplier payment details by location and purpose?",
+        "What is the budget recovery by billing purpose?",
+        "What are the details of customer billing?",
+        "What are the details of supplier payments?",
     ]
 
     for message in st.session_state.chat_history:
