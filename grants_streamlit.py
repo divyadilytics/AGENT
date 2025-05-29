@@ -284,7 +284,9 @@ if not st.session_state.authenticated:
             st.error(f"Authentication failed: {e}")
 else:
     session = st.session_state.snowpark_session
-    root = Root(session)
+    session = st.session_state.snowpark_session
+# remove any reference to 'Root'
+
 
     def run_snowflake_query(query):
         try:
