@@ -1,8 +1,10 @@
 streamlit
-snowflake-snowpark-python==1.32.0
-streamlit-chat
+pandas
 plotly
-# snowflake-cortex ← comment this
+snowflake-connector-python
+snowflake-snowpark-python
+requests
+
 
 
 
