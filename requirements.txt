@@ -1,9 +1,10 @@
 streamlit
 pandas
-plotly
 snowflake-connector-python
 snowflake-snowpark-python
+plotly
 requests
+
 
 
 
